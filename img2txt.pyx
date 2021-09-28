@@ -163,8 +163,6 @@ cdef class Font:
         cdef CharResult out = CharResult()
 
         cdef uint32_t font_h = self.font_h
-        cdef uint32_t mask = (1 << font_h) - 1
-
         cdef uint32_t const1, const2
         const1, const2 = self.const1, self.const2
         cdef uint32_t font_min_w, font_max_w
@@ -174,29 +172,15 @@ cdef class Font:
         t0 = time.monotonic()
 
         # vhash
-        cdef vector[uint64_t] vhash
+        cdef vector[uint32_t] vhash
         vhash.resize(w * h)
+        get_vhash(vhash.data(), font_h, const1, const2, pixels, w, h)
 
-        cdef uint32_t x, y
-        cdef uint32_t pc
-        cdef uint64_t col, hval
-        for x in range(w):
-            col = 0
-            pc = pixels[x]
-            for y in range(h):
-                if pixels[w * y + x] != pc:
-                    pc = pixels[w * y + x]
-                    col = ~col
-                col <<= 1
-
-                if y + 1 < font_h:
-                    continue
-
-                hval = (col & mask) * const2 + ((~col) & mask) * const1
-                vhash[w * (y + 1 - font_h) + x] = hval
         t1 = time.monotonic()
 
         # match
+        cdef uint32_t x, y
+        cdef uint64_t hval
         cdef uint8_t *cbits
         cdef uint32_t fw
         cdef uint32_t ix
@@ -244,6 +228,32 @@ cdef class Font:
         out.stats_time_loop_us = (t2 - t1) * 1e6
         out.stats_pos_total = (w - font_min_w + 1) * (h - font_h + 1)
         return out
+
+
+cdef void get_vhash(
+    uint32_t *vhash, uint32_t font_h, uint32_t const1, uint32_t const2,
+    uint32_t *pixels, uint32_t w, uint32_t h,
+):
+    assert font_h < 32
+
+    cdef uint32_t mask = (1 << font_h) - 1
+    cdef uint32_t x, y
+    cdef uint32_t pc
+    cdef uint32_t col, hval     # NOTE: font_h < 32
+    for x in range(w):
+        col = 0
+        pc = pixels[x]
+        for y in range(h):
+            if pixels[w * y + x] != pc:
+                pc = pixels[w * y + x]
+                col = ~col
+            col <<= 1
+
+            if y + 1 < font_h:
+                continue
+
+            hval = (col & mask) * const2 + ((~col) & mask) * const1
+            vhash[w * (y + 1 - font_h) + x] = hval
 
 
 cdef bool is_match(
