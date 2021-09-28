@@ -1,0 +1,18 @@
+from libcpp.utility cimport pair
+
+cdef extern from "htab.hpp" nogil:
+    cdef cppclass htab[K, V, H]:
+        ctypedef pair[K, V] value_type
+        ctypedef value_type *iterator
+
+        htab()
+        V& operator[](K&)
+        void clear()
+        size_t count(K&)
+        bint empty()
+        iterator end()
+        iterator find(K&)
+        size_t size()
+        void max_load_factor(float)
+        float max_load_factor()
+        float load_factor()
