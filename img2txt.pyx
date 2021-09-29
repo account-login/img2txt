@@ -235,24 +235,27 @@ cdef void get_vhash(
     uint32_t *pixels, uint32_t w, uint32_t h,
 ):
     assert font_h < 32
+    if h < font_h:
+        return
 
     cdef uint32_t mask = (1 << font_h) - 1
+    cdef uint32_t hval      # NOTE: font_h < 32
     cdef uint32_t x, y
-    cdef uint32_t pc
-    cdef uint32_t col, hval     # NOTE: font_h < 32
-    for x in range(w):
-        col = 0
-        pc = pixels[x]
-        for y in range(h):
-            if pixels[w * y + x] != pc:
-                pc = pixels[w * y + x]
-                col = ~col
-            col <<= 1
+    cdef uint32_t c, pc
+    cdef vector[uint32_t] col
+    col.resize(w)
+    for y in range(1, h):
+        for x in range(w):
+            pc = pixels[w * (y - 1) + x]
+            c = pixels[w * y + x]
+            if pc != c:
+                col[x] = ~col[x]
+            col[x] <<= 1
 
             if y + 1 < font_h:
                 continue
 
-            hval = (col & mask) * const2 + ((~col) & mask) * const1
+            hval = (col[x] & mask) * const2 + ((~col[x]) & mask) * const1
             vhash[w * (y + 1 - font_h) + x] = hval
 
 
