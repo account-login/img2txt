@@ -1,7 +1,7 @@
 cimport cython
 from cython.operator cimport dereference
 from libc.stdint cimport *
-from libc.string cimport memcmp
+from libc.string cimport memcmp, memcpy
 from libcpp cimport bool
 from libcpp.string cimport string
 from libcpp.vector cimport vector
@@ -183,29 +183,43 @@ cdef class Font:
         cdef uint64_t hval
         cdef uint8_t *cbits
         cdef uint32_t fw
-        cdef uint32_t ix
+
+        cdef vector[uint64_t] hhash_data
+        hhash_data.resize(w * 2)
+        cdef uint64_t *hhash_in = hhash_data.data()
+        cdef uint64_t *hhash_out = hhash_data.data() + w
+
+        cdef vector[uint32_t] hpos_data
+        hpos_data.resize(w * 2)
+        cdef uint32_t *hpos_in = hpos_data.data()
+        cdef uint32_t *hpos_out = hpos_data.data() + w
+
+        cdef size_t in_size, out_size
+        cdef size_t i
+
         for y in range(h + 1 - font_h):
-            for x in range(w):
-                hval = 0
-                for ix in range(x, min(x + font_max_w, w)):
-                    hval <<= 1
-                    hval ^= vhash[w * y + ix]
+            in_size, out_size = w, 0
+            for i in range(w):
+                hpos_in[i] = i
+            for i in range(w):
+                hhash_in[i] = vhash[w * y + i]
+            for fw in range(1, font_min_w):
+                for i in range(w - fw):
+                    hhash_in[i] <<= 1
+                    hhash_in[i] ^= vhash[w * y + i + fw]
 
-                    if ix - x + 1 < font_min_w:
-                        continue
-
-                    out.stats_lookup += 1
+            for fw in range(font_min_w, font_max_w + 1):
+                for i in range(in_size):
+                    x = hpos_in[i]
+                    hval = hhash_in[i]
                     it = self.mapping.find(hval)
                     if it == self.mapping.end():
-                        break
+                        continue
 
                     node = &dereference(it).second
                     for code in node.codes:
                         # assert not self.code2bits[code].empty()
-                        # if self.code2bits[code].size() != (ix - x + 1) * font_h:
-                        #     continue
-                        fw = self.code2bits[code].size() // font_h
-                        if fw != ix - x + 1:
+                        if self.code2bits[code].size() != fw * font_h:
                             continue
 
                         out.stats_check += 1
@@ -216,11 +230,24 @@ cdef class Font:
                         out.stats_hit += 1
                         out.chars.push_back(CharPos(x=x, y=y, code=code, font=<void *>self))
 
-                    if not (node.levels & ((<uint64_t>1) << (ix - x))):
-                        # XXX: handle ix - x >= 64?
+                    if not (node.levels & ((<uint64_t>1) << (fw - 1))):
+                        # XXX: handle fw - 1 >= 64?
                         # XXX: 32bit enough?
-                        break
-                    out.stats_node += 1
+                        continue
+
+                    if x + fw < w:
+                        hval <<= 1
+                        hval ^= vhash[w * y + x + fw]
+                        hhash_out[out_size] = hval
+                        hpos_out[out_size] = x
+                        out_size += 1
+
+                out.stats_lookup += in_size
+                out.stats_node += out_size
+
+                hhash_in, hhash_out = hhash_out, hhash_in
+                hpos_in, hpos_out = hpos_out, hpos_in
+                in_size, out_size = out_size, 0
 
         t2 = time.monotonic()
 
