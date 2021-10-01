@@ -18,27 +18,22 @@ cdef bool is_vertical_line_only(uint8_t *bits, uint32_t w, uint32_t h):
     return True
 
 
-cdef struct Node:
-    uint64_t levels
-    vector[uint32_t] codes
-
-
 include "htab.pyd"
 
 cdef extern from "hasher.h":
     ctypedef int hasher "&hasher"
 
-ctypedef htab[uint64_t, Node, hasher] MapType
+ctypedef htab[uint64_t, uint64_t, hasher] MapType
 # ctypedef unordered_map[uint64_t, Node] MapType
 
 
-cdef void add_bits(
-    MapType &mapping, uint32_t const1, uint32_t const2,
-    uint32_t code, uint8_t *bits, uint32_t w, uint32_t h,
-):
+cdef void add_bits(_CPPFont *self, uint32_t code, uint8_t *bits, uint32_t w, uint32_t h):
     cdef uint64_t col, loc
     cdef uint64_t hval = 0
     cdef uint32_t x, y
+    cdef uint32_t sz, off
+    cdef uint64_t *val_ref
+    cdef size_t i
     for x in range(w):
         col = 0
         for y in range(h):
@@ -50,19 +45,20 @@ cdef void add_bits(
             col, loc = loc, col
 
         hval <<= 1
-        hval ^= col * const2 + loc * const1
+        hval ^= col * self.const2 + loc * self.const1
 
-        is_new = not mapping.count(hval)
-        node = &mapping[hval]
-        if is_new:
-            node.levels = 0
-
+        val_ref = &self.mapping[x if x < 64 else 63][hval]
         if x + 1 == w:
-            # if code == 65:
-            #     assert hval == 1073122565, f'bits:{bits[:w*h]}'
-            node.codes.push_back(code)
-        else:
-            node.levels |= (<uint64_t>1) << x
+            sz = val_ref[0] >> 32
+            off = <uint32_t>val_ref[0]
+
+            for i in range(sz):
+                self.codes.push_back(self.codes[off + i])
+            self.codes.push_back(code)
+
+            sz += 1
+            off = self.codes.size() - sz
+            val_ref[0] = ((<uint64_t>sz) << 32) | off
 
 
 cdef uint64_t space_hash(uint32_t w, uint32_t h, uint32_t const1, uint32_t const2):
@@ -91,170 +87,172 @@ cdef class CharResult:
     cdef vector[CharPos] chars
 
 
-cdef class Font:
-    cdef bool loaded
-    cdef uint32_t font_h
-    cdef uint32_t font_min_w, font_max_w
-    cdef MapType mapping
+cdef cppclass _CPPFont:
+    bool loaded
+    uint32_t font_h
+    uint32_t font_min_w, font_max_w
+    uint32_t const1, const2
+    vector[string] code2bits
+    vector[uint32_t] codes
+    MapType mapping[64]
+
+
+cdef void load_json_file(_CPPFont *self, filename, uint32_t const1, uint32_t const2):
+    assert not self.loaded
+    self.loaded = True
+
+    self.const1, self.const2 = const1, const2
+
+    import json
+    with open(filename, 'rt', encoding='utf-8') as fp:
+        code2obj = json.load(fp)
+
+    _, self.font_h, _ = code2obj[ord('A')]
+    self.font_min_w, self.font_max_w = 0xffffffff, 0
+
+    self.code2bits.resize(0x10000)
+
+    cdef uint32_t w, h
+    cdef string bits
+    cdef unordered_set[string] dedup
+    cdef uint32_t code
+    for code, obj in enumerate(code2obj):
+        if obj is None:
+            continue
+
+        w, h, py_bits = obj
+        assert h == self.font_h
+        bits = py_bits.encode('utf-8')
+        for i in range(bits.size()):
+            bits[i] -= 48
+
+        if dedup.count(bits):
+            continue
+        dedup.insert(bits)
+
+        if w <= 1:
+            continue    # too narrow
+        if is_vertical_line_only(<uint8_t *>bits.data(), w, h):
+            continue    # FIXME: handle this later
+
+        self.font_max_w = max(self.font_max_w, w)
+        self.font_min_w = min(self.font_min_w, w)
+
+        add_bits(self, code, <uint8_t *>bits.data(), w, h)
+        self.code2bits[code] = bits
+        # self.code2bits[code].swap(bits)
+
+    # check empty space not collide with other chars
+    for w in range(1, self.font_max_w + 1):
+        hval = space_hash(w, self.font_h, const1, const2)
+        if not self.mapping[w - 1 if w - 1 < 64 else 63].count(hval):
+            continue
+        assert self.mapping[w - 1 if w - 1 < 64 else 63][hval] == 0
+
+    # assert not self.mapping.count(0)
+
+
+@cython.cdivision(True)
+cdef CharResult run(_CPPFont *self, uint32_t *pixels, uint32_t w, uint32_t h):
+    assert self.loaded
+
+    cdef CharResult out = CharResult()
+
+    cdef uint32_t font_h = self.font_h
     cdef uint32_t const1, const2
-    cdef vector[string] code2bits
+    const1, const2 = self.const1, self.const2
+    cdef uint32_t font_min_w, font_max_w
+    font_min_w, font_max_w = self.font_min_w, self.font_max_w
 
-    def __init__(self):
-        pass
+    import time
+    t0 = time.monotonic()
 
-    def load_json_file(self, filename, uint32_t const1, uint32_t const2):
-        assert not self.loaded
-        self.loaded = True
+    # vhash
+    cdef vector[uint32_t] vhash
+    vhash.resize(w * h)
+    get_vhash(vhash.data(), font_h, const1, const2, pixels, w, h)
 
-        self.const1, self.const2 = const1, const2
+    t1 = time.monotonic()
 
-        import json
-        with open(filename, 'rt', encoding='utf-8') as fp:
-            code2obj = json.load(fp)
+    # match
+    cdef uint32_t x, y
+    cdef uint64_t hval
+    cdef uint8_t *cbits
+    cdef uint32_t fw
 
-        _, self.font_h, _ = code2obj[ord('A')]
-        self.font_min_w, self.font_max_w = 0xffffffff, 0
+    cdef vector[uint64_t] hhash_data
+    hhash_data.resize(w * 2)
+    cdef uint64_t *hhash_in = hhash_data.data()
+    cdef uint64_t *hhash_out = hhash_data.data() + w
 
-        self.code2bits.resize(0x10000)
+    cdef vector[uint32_t] hpos_data
+    hpos_data.resize(w * 2)
+    cdef uint32_t *hpos_in = hpos_data.data()
+    cdef uint32_t *hpos_out = hpos_data.data() + w
 
-        cdef uint32_t w, h
-        cdef string bits
-        cdef unordered_set[string] dedup
-        cdef uint32_t code
-        for code, obj in enumerate(code2obj):
-            if obj is None:
-                continue
+    cdef size_t in_size, out_size
+    cdef size_t i
+    cdef MapType *m
+    cdef uint64_t sz_off
+    cdef uint32_t sz, off
 
-            w, h, py_bits = obj
-            assert h == self.font_h
-            bits = py_bits.encode('utf-8')
-            for i in range(bits.size()):
-                bits[i] -= 48
+    for y in range(h + 1 - font_h):
+        in_size, out_size = w, 0
+        for i in range(w):
+            hpos_in[i] = i
+        for i in range(w):
+            hhash_in[i] = vhash[w * y + i]
+        for fw in range(1, font_min_w):
+            for i in range(w - fw):
+                hhash_in[i] <<= 1
+                hhash_in[i] ^= vhash[w * y + i + fw]
 
-            if dedup.count(bits):
-                continue
-            dedup.insert(bits)
+        for fw in range(font_min_w, font_max_w + 1):
+            m = &self.mapping[fw - 1 if fw - 1 < 64 else 63]
+            for i in range(in_size):
+                x = hpos_in[i]
+                hval = hhash_in[i]
+                it = m.find(hval)
+                if it == m.end():
+                    continue
 
-            if w <= 1:
-                continue    # too narrow
-            if is_vertical_line_only(<uint8_t *>bits.data(), w, h):
-                continue    # FIXME: handle this later
-
-            self.font_max_w = max(self.font_max_w, w)
-            self.font_min_w = min(self.font_min_w, w)
-
-            add_bits(self.mapping, const1, const2, code, <uint8_t *>bits.data(), w, h)
-            self.code2bits[code] = bits
-            # self.code2bits[code].swap(bits)
-
-        # check empty space not collide with other chars
-        for w in range(self.font_max_w + 1):
-            hval = space_hash(w, self.font_h, const1, const2)
-            if not self.mapping.count(hval):
-                continue
-            assert self.mapping[hval].codes.empty(), f'w:{w} hval:{hval} node:{self.mapping[hval]} bits:{self.code2bits[self.mapping[hval].codes[0]]}'
-
-        # assert not self.mapping.count(0)
-
-    @cython.cdivision(True)
-    cdef CharResult run(self, uint32_t *pixels, uint32_t w, uint32_t h):
-        assert self.loaded
-
-        cdef CharResult out = CharResult()
-
-        cdef uint32_t font_h = self.font_h
-        cdef uint32_t const1, const2
-        const1, const2 = self.const1, self.const2
-        cdef uint32_t font_min_w, font_max_w
-        font_min_w, font_max_w = self.font_min_w, self.font_max_w
-
-        import time
-        t0 = time.monotonic()
-
-        # vhash
-        cdef vector[uint32_t] vhash
-        vhash.resize(w * h)
-        get_vhash(vhash.data(), font_h, const1, const2, pixels, w, h)
-
-        t1 = time.monotonic()
-
-        # match
-        cdef uint32_t x, y
-        cdef uint64_t hval
-        cdef uint8_t *cbits
-        cdef uint32_t fw
-
-        cdef vector[uint64_t] hhash_data
-        hhash_data.resize(w * 2)
-        cdef uint64_t *hhash_in = hhash_data.data()
-        cdef uint64_t *hhash_out = hhash_data.data() + w
-
-        cdef vector[uint32_t] hpos_data
-        hpos_data.resize(w * 2)
-        cdef uint32_t *hpos_in = hpos_data.data()
-        cdef uint32_t *hpos_out = hpos_data.data() + w
-
-        cdef size_t in_size, out_size
-        cdef size_t i
-
-        for y in range(h + 1 - font_h):
-            in_size, out_size = w, 0
-            for i in range(w):
-                hpos_in[i] = i
-            for i in range(w):
-                hhash_in[i] = vhash[w * y + i]
-            for fw in range(1, font_min_w):
-                for i in range(w - fw):
-                    hhash_in[i] <<= 1
-                    hhash_in[i] ^= vhash[w * y + i + fw]
-
-            for fw in range(font_min_w, font_max_w + 1):
-                for i in range(in_size):
-                    x = hpos_in[i]
-                    hval = hhash_in[i]
-                    it = self.mapping.find(hval)
-                    if it == self.mapping.end():
+                sz_off = dereference(it).second
+                sz = sz_off >> 32
+                off = <uint32_t>sz_off
+                for i in range(sz):
+                    code = self.codes[off + i]
+                    # assert not self.code2bits[code].empty()
+                    if self.code2bits[code].size() != fw * font_h:
                         continue
 
-                    node = &dereference(it).second
-                    for code in node.codes:
-                        # assert not self.code2bits[code].empty()
-                        if self.code2bits[code].size() != fw * font_h:
-                            continue
-
-                        out.stats_check += 1
-                        cbits = <uint8_t *>self.code2bits[code].data()
-                        if not is_match(pixels, w, h, x, y, cbits, fw, font_h):
-                            continue
-
-                        out.stats_hit += 1
-                        out.chars.push_back(CharPos(x=x, y=y, code=code, font=<void *>self))
-
-                    if not (node.levels & ((<uint64_t>1) << (fw - 1))):
-                        # XXX: handle fw - 1 >= 64?
-                        # XXX: 32bit enough?
+                    out.stats_check += 1
+                    cbits = <uint8_t *>self.code2bits[code].data()
+                    if not is_match(pixels, w, h, x, y, cbits, fw, font_h):
                         continue
 
-                    if x + fw < w:
-                        hval <<= 1
-                        hval ^= vhash[w * y + x + fw]
-                        hhash_out[out_size] = hval
-                        hpos_out[out_size] = x
-                        out_size += 1
+                    out.stats_hit += 1
+                    out.chars.push_back(CharPos(x=x, y=y, code=code, font=<void *>self))
 
-                out.stats_lookup += in_size
-                out.stats_node += out_size
+                if x + fw < w:
+                    hval <<= 1
+                    hval ^= vhash[w * y + x + fw]
+                    hhash_out[out_size] = hval
+                    hpos_out[out_size] = x
+                    out_size += 1
 
-                hhash_in, hhash_out = hhash_out, hhash_in
-                hpos_in, hpos_out = hpos_out, hpos_in
-                in_size, out_size = out_size, 0
+            out.stats_lookup += in_size
+            out.stats_node += out_size
 
-        t2 = time.monotonic()
+            hhash_in, hhash_out = hhash_out, hhash_in
+            hpos_in, hpos_out = hpos_out, hpos_in
+            in_size, out_size = out_size, 0
 
-        out.stats_time_vhash_us = (t1 - t0) * 1e6
-        out.stats_time_loop_us = (t2 - t1) * 1e6
-        out.stats_pos_total = (w - font_min_w + 1) * (h - font_h + 1)
-        return out
+    t2 = time.monotonic()
+
+    out.stats_time_vhash_us = (t1 - t0) * 1e6
+    out.stats_time_loop_us = (t2 - t1) * 1e6
+    out.stats_pos_total = (w - font_min_w + 1) * (h - font_h + 1)
+    return out
 
 
 cdef void get_vhash(
@@ -307,6 +305,22 @@ cdef bool is_match(
     return True
 
 
+cdef class Font:
+    cdef _CPPFont *wrapped
+
+    def __cinit__(self):
+        self.wrapped = new _CPPFont()
+
+    def __dealloc__(self):
+        del self.wrapped
+
+    cdef void load_json_file(self, filename, uint32_t const1, uint32_t const2):
+        load_json_file(self.wrapped, filename, const1, const2)
+
+    cdef CharResult run(self, uint32_t *pixels, uint32_t w, uint32_t h):
+        return run(self.wrapped, pixels, w, h)
+
+
 cdef main():
     import argparse
     ap = argparse.ArgumentParser()
@@ -335,10 +349,15 @@ cdef main():
     # load font
     font = Font()
     font.load_json_file(args.font, args.const1, args.const2)
-    print(
-        'maping_size', font.mapping.size(),
-        'load_factor', font.mapping.load_factor(), 'max_load_factor', font.mapping.max_load_factor(),
-    )
+
+    # for i in range(64):
+    #     if font.wrapped.mapping[i].empty():
+    #         continue
+    #     print(
+    #         'w', i,
+    #         'maping_size', font.wrapped.mapping[i].size(),
+    #         'load_factor', font.wrapped.mapping[i].load_factor()
+    #     )
 
     result = font.run(pixels.data(), w, h)
 

@@ -22,8 +22,16 @@ struct htab {
         clear();
     }
 
+    size_t bucket_count() const {
+        return _mask ? _mask + 1 : 0;
+    }
+
     size_t size() const {
         return _size;
+    }
+
+    bool empty() const {
+        return 0 == size();
     }
 
     float max_load_factor() const {

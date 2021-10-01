@@ -16,3 +16,4 @@ cdef extern from "htab.hpp" nogil:
         void max_load_factor(float)
         float max_load_factor()
         float load_factor()
+        size_t bucket_count()
