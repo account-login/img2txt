@@ -7,6 +7,7 @@ from libcpp.string cimport string
 from libcpp.vector cimport vector
 from libcpp.unordered_set cimport unordered_set
 from libcpp.unordered_map cimport unordered_map
+from posix.unistd cimport read as posix_read
 
 
 # indistinguishable from background
@@ -95,6 +96,88 @@ cdef cppclass _CPPFont:
     vector[string] code2bits
     vector[uint32_t] codes
     MapType mapping[64]
+
+
+cdef void load_bin_file(_CPPFont *self, filename):
+    assert not self.loaded
+    self.loaded = True
+
+    cdef vector[uint8_t] file_data
+    cdef size_t got = 0
+    import os
+    cdef int fd = os.open(filename, os.O_RDONLY)
+    try:
+        file_data.resize(<size_t>os.fstat(fd).st_size)
+        while True:
+            rv = posix_read(fd, file_data.data() + got, file_data.size() - got)
+            assert rv > 0
+            got += rv
+            if got == file_data.size():
+                break
+    finally:
+        os.close(fd)
+
+    # fp.write(b'IMG2TXT!')
+    # fp.write(b'\x00' * 8)
+    # fp.write(struct.pack('<IIII', font_h, blob.size(), const1, const2))
+    # fp.write((<uint8_t *>codes.data())[0:0x40000])
+    # fp.write((<uint8_t *>blob.data())[:4*blob.size()])
+    import struct
+    assert file_data.data()[:8] == b'IMG2TXT!'
+    assert file_data.data()[8:16] == b'\0\0\0\0\0\0\0\0'
+    cdef size_t blob_sz
+    self.font_h, blob_sz, self.const1, self.const2 = struct.unpack('<IIII', file_data.data()[16:32])
+    cdef uint32_t *codes = <uint32_t *>(file_data.data() + 32)
+    cdef uint32_t *blob = &codes[0x10000]
+    assert 32 + 0x40000 + blob_sz <= file_data.size()
+
+    self.font_min_w, self.font_max_w = 0xffffffff, 0
+    self.code2bits.resize(0x10000)
+
+    cdef uint32_t code
+    cdef unordered_set[uint32_t] dedup
+    cdef uint32_t w
+    cdef uint8_t flag
+    cdef size_t off, i
+    cdef string bits
+    for code in range(0x10000):
+        if codes[code] == 0:
+            continue
+
+        if dedup.count(codes[code]):
+            continue
+        dedup.insert(codes[code])
+
+        w = codes[code] & 0xff
+        flag = (codes[code] >> 8) & 0b11
+        off = codes[code] >> 10
+
+        if w <= 1:
+            continue    # too narrow
+        if flag:
+            continue    # FIXME: handle vertical lines later
+
+        self.font_max_w = max(self.font_max_w, w)
+        self.font_min_w = min(self.font_min_w, w)
+
+        bits.resize(w * self.font_h)
+        for i in range(w * self.font_h):
+            bits[i] = <bool>(blob[off + i // 32] & (1 << (i % 32)))
+
+        add_bits(self, code, <uint8_t *>bits.data(), w, self.font_h)
+        self.code2bits[code] = bits
+        # self.code2bits[code].swap(bits)
+
+    # check empty space not collide with other chars
+    cdef size_t mapidx
+    for w in range(1, self.font_max_w + 1):
+        hval = space_hash(w, self.font_h, self.const1, self.const2)
+        mapidx = w - 1 if w - 1 < 64 else 63
+        if not self.mapping[mapidx].count(hval):
+            continue
+        assert self.mapping[mapidx][hval] == 0
+
+    # assert not self.mapping.count(0)
 
 
 cdef void load_json_file(_CPPFont *self, filename, uint32_t const1, uint32_t const2):
@@ -317,6 +400,9 @@ cdef class Font:
     cdef void load_json_file(self, filename, uint32_t const1, uint32_t const2):
         load_json_file(self.wrapped, filename, const1, const2)
 
+    cdef void load_bin_file(self, filename):
+        load_bin_file(self.wrapped, filename)
+
     cdef CharResult run(self, uint32_t *pixels, uint32_t w, uint32_t h):
         return run(self.wrapped, pixels, w, h)
 
@@ -325,9 +411,11 @@ cdef main():
     import argparse
     ap = argparse.ArgumentParser()
     ap.add_argument('--image', required=True, help='image file')
-    ap.add_argument('--font', required=True, help='font.json')
-    ap.add_argument('--const1', required=True, type=int, help='const1')
-    ap.add_argument('--const2', required=True, type=int, help='const1')
+    mg = ap.add_mutually_exclusive_group(required=True)
+    mg.add_argument('--bin', help='trained font file')
+    mg.add_argument('--font', help='font.json')
+    ap.add_argument('--const1', type=int, help='const1')
+    ap.add_argument('--const2', type=int, help='const1')
     args = ap.parse_args()
 
     # load image
@@ -349,7 +437,12 @@ cdef main():
 
     # load font
     font = Font()
-    font.load_json_file(args.font, args.const1, args.const2)
+    if args.font:
+        assert args.const1 and args.const2
+        font.load_json_file(args.font, args.const1, args.const2)
+    else:
+        assert args.const1 is args.const2 is None
+        font.load_bin_file(args.bin)
 
     # for i in range(64):
     #     if font.wrapped.mapping[i].empty():
