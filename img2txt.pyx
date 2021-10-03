@@ -334,17 +334,18 @@ cdef main():
     import PIL.Image
     im = PIL.Image.open(args.image)
     im = im.convert('RGB')
+    im.load()
 
     cdef uint32_t w, h
     w, h = im.width, im.height
     cdef vector[uint32_t] pixels
     pixels.resize(w * h)
+    cdef uint32_t **rgb = <uint32_t **><uintptr_t>(dict(im.im.unsafe_ptrs)['image32'])
 
-    cdef uint32_t x, y, r, g, b
+    cdef uint32_t x, y
     for y in range(h):
         for x in range(w):
-            r, g, b = im.getpixel((x, y))
-            pixels[w * y + x] = (b << 16) | (g << 8) | r
+            pixels[w * y + x] = rgb[y][x] & 0xffffff
 
     # load font
     font = Font()
