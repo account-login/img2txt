@@ -10,15 +10,6 @@ from libcpp.unordered_map cimport unordered_map
 from posix.unistd cimport read as posix_read
 
 
-# indistinguishable from background
-cdef bool is_vertical_line_only(uint8_t *bits, uint32_t w, uint32_t h):
-    cdef uint32_t y
-    for y in range(1, h):
-        if memcmp(&bits[w * y], bits, w):
-            return False
-    return True
-
-
 include "htab.pyd"
 
 cdef extern from "hasher.h":
@@ -176,61 +167,6 @@ cdef void load_bin_file(_CPPFont *self, filename):
         if not self.mapping[mapidx].count(hval):
             continue
         assert self.mapping[mapidx][hval] == 0
-
-    # assert not self.mapping.count(0)
-
-
-cdef void load_json_file(_CPPFont *self, filename, uint32_t const1, uint32_t const2):
-    assert not self.loaded
-    self.loaded = True
-
-    self.const1, self.const2 = const1, const2
-
-    import json
-    with open(filename, 'rt', encoding='utf-8') as fp:
-        code2obj = json.load(fp)
-
-    _, self.font_h, _ = code2obj[ord('A')]
-    self.font_min_w, self.font_max_w = 0xffffffff, 0
-
-    self.code2bits.resize(0x10000)
-
-    cdef uint32_t w, h
-    cdef string bits
-    cdef unordered_set[string] dedup
-    cdef uint32_t code
-    for code, obj in enumerate(code2obj):
-        if obj is None:
-            continue
-
-        w, h, py_bits = obj
-        assert h == self.font_h
-        bits = py_bits.encode('utf-8')
-        for i in range(bits.size()):
-            bits[i] -= 48
-
-        if dedup.count(bits):
-            continue
-        dedup.insert(bits)
-
-        if w <= 1:
-            continue    # too narrow
-        if is_vertical_line_only(<uint8_t *>bits.data(), w, h):
-            continue    # FIXME: handle this later
-
-        self.font_max_w = max(self.font_max_w, w)
-        self.font_min_w = min(self.font_min_w, w)
-
-        add_bits(self, code, <uint8_t *>bits.data(), w, h)
-        self.code2bits[code] = bits
-        # self.code2bits[code].swap(bits)
-
-    # check empty space not collide with other chars
-    for w in range(1, self.font_max_w + 1):
-        hval = space_hash(w, self.font_h, const1, const2)
-        if not self.mapping[w - 1 if w - 1 < 64 else 63].count(hval):
-            continue
-        assert self.mapping[w - 1 if w - 1 < 64 else 63][hval] == 0
 
     # assert not self.mapping.count(0)
 
@@ -397,9 +333,6 @@ cdef class Font:
     def __dealloc__(self):
         del self.wrapped
 
-    cdef void load_json_file(self, filename, uint32_t const1, uint32_t const2):
-        load_json_file(self.wrapped, filename, const1, const2)
-
     cdef void load_bin_file(self, filename):
         load_bin_file(self.wrapped, filename)
 
@@ -411,11 +344,7 @@ cdef main():
     import argparse
     ap = argparse.ArgumentParser()
     ap.add_argument('--image', required=True, help='image file')
-    mg = ap.add_mutually_exclusive_group(required=True)
-    mg.add_argument('--bin', help='trained font file')
-    mg.add_argument('--font', help='font.json')
-    ap.add_argument('--const1', type=int, help='const1')
-    ap.add_argument('--const2', type=int, help='const1')
+    ap.add_argument('--bin', required=True, help='trained font file')
     args = ap.parse_args()
 
     # load image
@@ -437,12 +366,7 @@ cdef main():
 
     # load font
     font = Font()
-    if args.font:
-        assert args.const1 and args.const2
-        font.load_json_file(args.font, args.const1, args.const2)
-    else:
-        assert args.const1 is args.const2 is None
-        font.load_bin_file(args.bin)
+    font.load_bin_file(args.bin)
 
     # for i in range(64):
     #     if font.wrapped.mapping[i].empty():
