@@ -101,6 +101,19 @@ cdef struct CharGroup:
 cdef class LineResult:
     cdef vector[CharGroup] lines
 
+    def tolist(self):
+        l = []
+        cdef vector[uint32_t] pycodes
+        cdef size_t i
+        for i in range(self.lines.size()):
+            line = &self.lines[i]
+            pycodes.clear()
+            for ch in line.chars:
+                pycodes.push_back(ch.code)
+            py_str = PyUnicode_FromKindAndData(PyUnicode_4BYTE_KIND, pycodes.data(), pycodes.size())
+            l.append((line.chars[0].x, line.chars[0].y, line.w, line.h, py_str))
+        return l
+
 
 cdef cppclass _CPPFont:
     bool loaded
@@ -594,19 +607,8 @@ cdef main():
     print('stats_time_loop_us', result.stats_time_loop_us)
 
     line_result = font.make_lines(<uintptr_t>pixels.data(), w, h, result)
-    cdef vector[uint32_t] pycodes
-    cdef size_t i
-    for i in range(line_result.lines.size()):
-        x = line_result.lines[i].chars[0].x
-        y = line_result.lines[i].chars[0].y
-        pycodes.clear()
-        for ch in line_result.lines[i].chars:
-            pycodes.push_back(ch.code)
-        py_str = PyUnicode_FromKindAndData(PyUnicode_4BYTE_KIND, pycodes.data(), pycodes.size())
-        print(y, x, x + line_result.lines[i].w, py_str)
-
-    # for cp in result.chars:
-    #     print(cp.x, cp.y, cp.code, chr(cp.code))
+    for x, y, w, h, s in line_result.tolist():
+        print(y, x, w, s)
 
 
 if __name__ == '__main__':
