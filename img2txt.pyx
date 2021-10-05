@@ -106,6 +106,7 @@ cdef cppclass _CPPFont:
     bool loaded
     uint32_t font_h
     uint32_t font_min_w, font_max_w
+    uint32_t space_w
     uint32_t const1, const2
     vector[string] code2bits
     vector[uint32_t] codes
@@ -146,6 +147,7 @@ cdef void load_bin_file(_CPPFont *self, filename):
     assert 32 + 0x40000 + blob_sz <= file_data.size()
 
     self.font_min_w, self.font_max_w = 0xffffffff, 0
+    self.space_w = 0
     self.code2bits.resize(0x10000)
 
     cdef uint32_t code
@@ -168,6 +170,8 @@ cdef void load_bin_file(_CPPFont *self, filename):
 
         if w <= 1:
             continue    # too narrow
+        if flag and code == 32:
+            self.space_w = w
         if flag:
             continue    # FIXME: handle vertical lines later
 
@@ -394,8 +398,6 @@ cdef LineResult make_lines(_CPPFont *self, uint32_t *pixels, uint32_t w, uint32_
 
         i = j
 
-    # TODO: add spaces
-
     # TODO: remove overlapping lines
     cdef vector[CharGroup] buf
     cdef vector[uint8_t] killed
@@ -418,7 +420,64 @@ cdef LineResult make_lines(_CPPFont *self, uint32_t *pixels, uint32_t w, uint32_
         i = j
     out.lines.swap(buf)
 
+    # TODO: add vertical lines and other spaces
+    # add spaces
+    buf.clear()
+    cdef vector[uint32_t] is_sp     # the number of following spaces
+    is_sp.resize(out.lines.size())
+    i = 0
+    while i + 1 < out.lines.size():
+        x = out.lines[i].chars[0].x + out.lines[i].w
+        y = out.lines[i].chars[0].y
+        is_sp[i] = out.lines[i + 1].chars[0].y == y and out.lines[i + 1].chars[0].x > x
+        is_sp[i] = is_sp[i] and (out.lines[i + 1].chars[0].x - x) % self.space_w == 0
+        is_sp[i] = is_sp[i] and is_space(pixels, w, h, x, y, out.lines[i + 1].chars[0].x - x, self.font_h)
+        if is_sp[i]:
+            is_sp[i] = (out.lines[i + 1].chars[0].x - x) // self.space_w
+        i += 1
+
+    cdef CharGroup *cur_line
+    cdef CharGroup *next_line
+    i = 0
+    while i < out.lines.size():
+        j = i
+        while j < out.lines.size() and is_sp[j]:
+            j += 1
+        if j < out.lines.size():
+            j += 1
+
+        buf.push_back(CharGroup(w=out.lines[i].w, h=self.font_h))
+        cur_line = &buf[buf.size() - 1]
+        cur_line.chars.swap(out.lines[i].chars)
+        for cur in range(i + 1, j):
+            # pad spaces
+            for _ in range(is_sp[cur - 1]):
+                cur_line.chars.push_back(CharPos(
+                    x=cur_line.chars[0].x + cur_line.w, y=cur_line.chars[0].y, w=self.space_w, code=32,
+                ))
+                cur_line.w += self.space_w
+            # the next piece
+            next_line = &out.lines[cur]
+            cur_line.chars.insert(cur_line.chars.end(), next_line.chars.begin(), next_line.chars.end())
+
+        i = j
+    out.lines.swap(buf)
+
     return out
+
+
+cdef bool is_space(
+    uint32_t *pixels, uint32_t w, uint32_t h,
+    uint32_t x, uint32_t y, uint32_t space_w, uint32_t space_h,
+):
+    cdef uint32_t i
+    for i in range(x + 1, x + space_w):
+        if pixels[w * y + x] != pixels[w * y + i]:
+            return False
+    for i in range(y + 1, y + space_h):
+        if 0 != memcmp(&pixels[w * y + x], &pixels[w * i + x], 4 * space_w):
+            return False
+    return True
 
 
 cdef class Font:
