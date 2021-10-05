@@ -363,6 +363,7 @@ cdef bool less_by_pos(const CharPos &lhs, const CharPos &rhs):
 cdef LineResult make_lines(_CPPFont *self, uint32_t *pixels, uint32_t w, uint32_t h, CharResult cr):
     cdef LineResult out = LineResult()
 
+    # group adjacent chars
     std_sort(cr.chars.begin(), cr.chars.end(), &less_by_pos)
 
     cdef CharGroup *line
@@ -398,26 +399,51 @@ cdef LineResult make_lines(_CPPFont *self, uint32_t *pixels, uint32_t w, uint32_
 
         i = j
 
-    # TODO: remove overlapping lines
+    if out.lines.empty():
+        return out
+
+    # TODO: remove all overlapping lines
+    # remove overlapping lines with the same y
+    cdef CharGroup *cur_line
+    cdef CharGroup *next_line
+    cdef uint32_t cur_line_end
+    cdef uint32_t next_line_begin
+    cdef uint32_t next_line_end
     cdef vector[CharGroup] buf
-    cdef vector[uint8_t] killed
-    i = 0
-    while i < out.lines.size():
-        x = out.lines[i].chars[0].x
-        y = out.lines[i].chars[0].y
-        j = i + 1
-        killed.clear()
-        killed.resize(1)
-        while j < out.lines.size() and out.lines[j].chars[0].y == y and out.lines[j].chars[0].x < x + out.lines[i].w:
-            killed.resize(j - i + 1)
-            if out.lines[j].chars[0].x + out.lines[j].w <= x + out.lines[i].w:
-                killed[j - i] = 1
-            j += 1
-        for cur in range(i, j):
-            if not killed[cur - i]:
-                buf.push_back(CharGroup(w=out.lines[cur].w, h=self.font_h))
-                buf.back().chars.swap(out.lines[cur].chars)
-        i = j
+
+    buf.push_back(CharGroup(w=out.lines[0].w, h=self.font_h))
+    buf.back().chars.swap(out.lines[0].chars)
+    for i in range(1, out.lines.size()):
+        cur_line = &buf[buf.size() - 1]
+        next_line = &out.lines[i]
+        cur_line_end = cur_line.chars[0].x + cur_line.w
+        next_line_begin = next_line.chars[0].x
+        next_line_end = next_line_begin + next_line.w
+
+        if cur_line.chars[0].y != next_line.chars[0].y:
+            pass
+        elif next_line_begin > cur_line_end:
+            pass
+        elif next_line_end <= cur_line_end:
+            # cur_line contains next_line, drop next_line
+            continue
+        elif cur_line.chars.size() == 1:
+            kill_cur = is_killable_right(
+                self, cur_line.chars[0].code, cur_line.w,
+                cur_line_end - next_line_begin,
+            )
+            if kill_cur:
+                buf.pop_back()
+        elif next_line.chars.size() == 1:
+            kill_next = is_killable_left(
+                self, next_line.chars[0].code, next_line.w,
+                cur_line_end - next_line_begin,
+            )
+            if kill_next:
+                continue
+
+        buf.push_back(CharGroup(w=out.lines[i].w, h=self.font_h))
+        buf.back().chars.swap(out.lines[i].chars)
     out.lines.swap(buf)
 
     # TODO: add vertical lines and other spaces
@@ -436,8 +462,6 @@ cdef LineResult make_lines(_CPPFont *self, uint32_t *pixels, uint32_t w, uint32_
             is_sp[i] = (out.lines[i + 1].chars[0].x - x) // self.space_w
         i += 1
 
-    cdef CharGroup *cur_line
-    cdef CharGroup *next_line
     i = 0
     while i < out.lines.size():
         j = i
@@ -464,6 +488,28 @@ cdef LineResult make_lines(_CPPFont *self, uint32_t *pixels, uint32_t w, uint32_
     out.lines.swap(buf)
 
     return out
+
+
+cdef bool is_killable_left(_CPPFont *self, uint32_t code, uint32_t fw, uint32_t overlap_len):
+    # assert overlap_len < fw
+    cdef uint8_t *bits = <uint8_t *>self.code2bits[code].data()
+    cdef uint32_t x, y
+    for y in range(self.font_h):
+        for x in range(overlap_len, fw):
+            if bits[fw * y + x]:
+                return False
+    return True
+
+
+cdef bool is_killable_right(_CPPFont *self, uint32_t code, uint32_t fw, uint32_t overlap_len):
+    # assert overlap_len < fw
+    cdef uint8_t *bits = <uint8_t *>self.code2bits[code].data()
+    cdef uint32_t x, y
+    for y in range(self.font_h):
+        for x in range(fw - overlap_len):
+            if bits[fw * y + x]:
+                return False
+    return True
 
 
 cdef bool is_space(
