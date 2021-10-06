@@ -4,7 +4,7 @@ from libc.stdint cimport *
 from libc.string cimport memcmp, memcpy
 from libcpp cimport bool
 from libcpp.algorithm cimport sort as std_sort
-from libcpp.string cimport string
+from libcpp.string cimport string, npos
 from libcpp.vector cimport vector
 from libcpp.unordered_set cimport unordered_set
 from libcpp.unordered_map cimport unordered_map
@@ -23,6 +23,10 @@ cdef extern from "hasher.h":
 
 ctypedef htab[uint64_t, uint64_t, hasher] MapType
 # ctypedef unordered_map[uint64_t, Node] MapType
+
+
+cdef extern from "Il_fix.h":
+    cdef unordered_set[string] g_Il_fix
 
 
 cdef void add_bits(_CPPFont *self, uint32_t code, uint8_t *bits, uint32_t w, uint32_t h):
@@ -120,30 +124,40 @@ cdef cppclass _CPPFont:
     uint32_t font_h
     uint32_t font_min_w, font_max_w
     uint32_t space_w
+    bool fix_Il
     uint32_t const1, const2
     vector[string] code2bits
     vector[uint32_t] codes
     MapType mapping[64]
 
 
-cdef void load_bin_file(_CPPFont *self, filename):
+cdef int32_t read_all(filename, vector[uint8_t] &out) except *:
+    cdef size_t got = 0
+    import os
+    cdef int fd = os.open(filename, os.O_RDONLY)
+    cdef ssize_t rv
+    try:
+        out.resize(<size_t>os.fstat(fd).st_size)
+        while True:
+            rv = posix_read(fd, out.data() + got, out.size() - got)
+            if rv < 0:
+                return rv
+            assert rv > 0
+            got += rv
+            if got == out.size():
+                break
+    finally:
+        os.close(fd)
+    return 0
+
+
+cdef void load_bin_file(_CPPFont *self, filename) except *:
     assert not self.loaded
     self.loaded = True
 
     cdef vector[uint8_t] file_data
-    cdef size_t got = 0
-    import os
-    cdef int fd = os.open(filename, os.O_RDONLY)
-    try:
-        file_data.resize(<size_t>os.fstat(fd).st_size)
-        while True:
-            rv = posix_read(fd, file_data.data() + got, file_data.size() - got)
-            assert rv > 0
-            got += rv
-            if got == file_data.size():
-                break
-    finally:
-        os.close(fd)
+    rv = read_all(filename, file_data)
+    assert rv == 0
 
     # fp.write(b'IMG2TXT!')
     # fp.write(b'\x00' * 8)
@@ -199,6 +213,8 @@ cdef void load_bin_file(_CPPFont *self, filename):
         self.code2bits[code] = bits
         # self.code2bits[code].swap(bits)
 
+    self.fix_Il = (codes[<size_t>b'I'] == codes[<size_t>b'l'])
+
     # check empty space not collide with other chars
     cdef size_t mapidx
     for w in range(1, self.font_max_w + 1):
@@ -211,6 +227,8 @@ cdef void load_bin_file(_CPPFont *self, filename):
     # assert not self.mapping.count(0)
 
 
+# TODO: add stride param to support cropping
+# TODO: add dist param to restrict the y coords
 @cython.cdivision(True)
 cdef CharResult run(_CPPFont *self, uint32_t *pixels, uint32_t w, uint32_t h):
     assert self.loaded
@@ -373,6 +391,30 @@ cdef bool less_by_pos(const CharPos &lhs, const CharPos &rhs):
         return k1 < k2
 
 
+cdef void fix_Il(CharGroup &line):
+    cdef string word
+    cdef size_t i
+    cdef bool need_fix, is_upper
+    for i in range(line.chars.size()):
+        code = line.chars[i].code
+        if b'a' <= code <= b'z' or b'A' <= code <= b'Z':
+            word.push_back(code)
+        elif word.size() > 0:
+            need_fix = word.size() > 1
+            need_fix = need_fix and word.find(73) != npos
+            is_upper = True
+            for ch in word:
+                is_upper = is_upper and b'A' <= ch <= b'Z'
+            need_fix = need_fix and not is_upper
+            need_fix = need_fix and g_Il_fix.count(word)
+            if need_fix:
+                j = i - word.size()
+                for idx in range(j, i):
+                    if line.chars[idx].code == b'I':
+                        line.chars[idx].code = b'l'
+            word.clear()
+
+
 cdef LineResult make_lines(_CPPFont *self, uint32_t *pixels, uint32_t w, uint32_t h, CharResult cr):
     cdef LineResult out = LineResult()
 
@@ -499,6 +541,10 @@ cdef LineResult make_lines(_CPPFont *self, uint32_t *pixels, uint32_t w, uint32_
 
         i = j
     out.lines.swap(buf)
+
+    if self.fix_Il:
+        for i in range(out.lines.size()):
+            fix_Il(out.lines[i])
 
     return out
 
