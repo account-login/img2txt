@@ -395,8 +395,8 @@ cdef void fix_Il(CharGroup &line):
     cdef string word
     cdef size_t i
     cdef bool need_fix, is_upper
-    for i in range(line.chars.size()):
-        code = line.chars[i].code
+    for i in range(line.chars.size() + 1):
+        code = line.chars[i].code if i < line.chars.size() else 0
         if b'a' <= code <= b'z' or b'A' <= code <= b'Z':
             word.push_back(code)
         elif word.size() > 0:
