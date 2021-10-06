@@ -51,7 +51,7 @@ for word in to_fix:
 print('};')
 
 print(r'''
-std::unordered_set<std::string> __init_g_Il_fix() {
+static std::unordered_set<std::string> __init_g_Il_fix() {
     std::unordered_set<std::string> m;
     size_t n = sizeof(g_Il_fix_list) / sizeof(g_Il_fix_list[0]);
     for (size_t i = 0; i < n; ++i) {
