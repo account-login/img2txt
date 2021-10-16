@@ -496,6 +496,20 @@ cdef LineResult make_lines(_CPPFont *self, uint32_t *pixels, uint32_t w, uint32_
             )
             if kill_next:
                 continue
+        elif cur_line.chars.back().x == next_line_begin:
+            # merge next_line into cur_line
+            cur_line.w -= cur_line.chars.back().w
+            cur_line.chars.pop_back()
+            cur_line.w += next_line.w
+            cur_line.chars.insert(cur_line.chars.end(), next_line.chars.begin(), next_line.chars.end())
+            continue
+        elif next_line.chars.size() > 1 and cur_line_end == next_line.chars[1].x:
+            # merge next_line into cur_line
+            cur_line.w += next_line.w - next_line.chars[0].w
+            cur_line.chars.insert(cur_line.chars.end(), next_line.chars.begin() + 1, next_line.chars.end())
+            continue
+        else:
+            'TODO: resolve overlappings'
 
         buf.push_back(CharGroup(w=out.lines[i].w, h=self.font_h))
         buf.back().chars.swap(out.lines[i].chars)
