@@ -415,6 +415,7 @@ cdef void fix_Il(CharGroup &line):
             word.clear()
 
 
+@cython.cdivision(True)
 cdef LineResult make_lines(_CPPFont *self, uint32_t *pixels, uint32_t w, uint32_t h, CharResult cr):
     cdef LineResult out = LineResult()
 
@@ -457,7 +458,6 @@ cdef LineResult make_lines(_CPPFont *self, uint32_t *pixels, uint32_t w, uint32_
     if out.lines.empty():
         return out
 
-    # TODO: remove all overlapping lines
     # remove overlapping lines with the same y
     cdef CharGroup *cur_line
     cdef CharGroup *next_line
@@ -500,6 +500,9 @@ cdef LineResult make_lines(_CPPFont *self, uint32_t *pixels, uint32_t w, uint32_
         buf.push_back(CharGroup(w=out.lines[i].w, h=self.font_h))
         buf.back().chars.swap(out.lines[i].chars)
     out.lines.swap(buf)
+
+    # remove overlapping lines
+    remove_noise(self, out.lines)
 
     # TODO: add vertical lines and other spaces
     # add spaces
@@ -547,6 +550,82 @@ cdef LineResult make_lines(_CPPFont *self, uint32_t *pixels, uint32_t w, uint32_
             fix_Il(out.lines[i])
 
     return out
+
+
+cdef void remove_noise(_CPPFont *self, vector[CharGroup] &out):
+    if out.empty():
+        return
+
+    cdef vector[vector[uint64_t]] collision_map
+    collision_map.resize(out.size())
+
+    cdef size_t i, j
+    cdef uint32_t x1, y1, w1, x2, y2, w2
+    cdef uint32_t o1, o2
+    for i in range(out.size() - 1):
+        x1 = out[i].chars[0].x
+        y1 = out[i].chars[0].y
+        w1 = out[i].w
+        for j in range(i + 1, out.size()):
+            x2 = out[j].chars[0].x
+            y2 = out[j].chars[0].y
+            w2 = out[j].w
+            if y2 > y1 + self.font_h:
+                break
+            if not segments_overlap(x1, w1, x2, w2):
+                continue
+            o1 = max(x1, x2)
+            o2 = min(x1 + w1, x2 + w2)
+            fill_overlappings(collision_map[i], w1, self.font_h, o1 - x1, o2 - x1, y2 - y1, self.font_h)
+            fill_overlappings(collision_map[j], w2, self.font_h, o1 - x2, o2 - x2, 0, y1 + self.font_h - y2)
+
+    cdef vector[CharGroup] buf
+    for i in range(out.size()):
+        if is_killable(self, out[i], collision_map[i]):
+            # FIXME: this will remove single char overlapping with single char
+            # print('killable', out[i].chars[0].y, out[i].chars[0].x, out[i].chars[0].code, out[i].w, out[i].h)
+            continue
+        buf.push_back(CharGroup(w=out[i].w, h=self.font_h))
+        buf.back().chars.swap(out[i].chars)
+    buf.swap(out)
+
+
+cdef bool segments_overlap(uint32_t x1, uint32_t w1, uint32_t x2, uint32_t w2):
+    return not (x1 + w1 <= x2 or x1 >= x2 + w2)
+
+
+cdef void fill_overlappings(
+    vector[uint64_t] &m, uint32_t w, uint32_t h,
+    uint32_t x1, uint32_t x2, uint32_t y1, uint32_t y2
+):
+    if m.empty():
+        m.resize(w * h // 64 + 1)
+    cdef uint32_t x, y
+    cdef size_t at
+    for y in range(y1, y2):
+        for x in range(x1, x2):
+            at = y * w + x
+            m[at // 64] |= (<uint64_t>1 << (at % 64))
+
+
+cdef bool is_killable(_CPPFont *self, const CharGroup &line, const vector[uint64_t] &m):
+    if m.empty():
+        return False
+
+    cdef size_t i, at
+    cdef uint32_t base_x = 0
+    cdef uint32_t x, y, w
+    for i in range(line.chars.size()):
+        bits = <uint8_t *>self.code2bits[line.chars[i].code].data()
+        w = line.chars[i].w
+        for y in range(self.font_h):
+            for x in range(w):
+                at = line.w * y + base_x + x
+                if bits[w * y + x] and not (m[at // 64] & (<uint64_t>1 << (at % 64))):
+                    return False
+        base_x += w
+
+    return True
 
 
 cdef bool is_killable_left(_CPPFont *self, uint32_t code, uint32_t fw, uint32_t overlap_len):
@@ -652,7 +731,12 @@ cdef main():
     print('stats_time_vhash_us', result.stats_time_vhash_us)
     print('stats_time_loop_us', result.stats_time_loop_us)
 
+    import time
+    t1 = time.monotonic()
     line_result = font.make_lines(<uintptr_t>pixels.data(), w, h, result)
+    t2 = time.monotonic()
+    print('stats_make_lines_us', int((t2 - t1) * 1e6))
+
     for x, y, w, h, s in line_result.tolist():
         print(y, x, w, s)
 
