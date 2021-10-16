@@ -74,7 +74,6 @@ cdef uint64_t space_hash(uint32_t w, uint32_t h, uint32_t const1, uint32_t const
 cdef struct CharPos:
     uint32_t x, y, w
     uint32_t code
-    void *font
 
 
 cdef class CharResult:
@@ -308,7 +307,7 @@ cdef CharResult run(_CPPFont *self, uint32_t *pixels, uint32_t w, uint32_t h):
                         continue
 
                     out.stats_hit += 1
-                    out.chars.push_back(CharPos(x=x, y=y, w=fw, code=code, font=<void *>self))
+                    out.chars.push_back(CharPos(x=x, y=y, w=fw, code=code))
 
                 if x + fw < w:
                     hval <<= 1
